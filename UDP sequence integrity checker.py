@@ -29,56 +29,54 @@ if file_index not in range(len(csv_files)):
     exit()
 
 selected_file = csv_files[file_index]
-print(f"\nProcessing: {selected_file}")
+print(f"\nProcessing: {selected_file}\n")
 
 # Read the CSV file
-df = pd.read_csv(os.path.join(script_dir, selected_file), dtype=str)
+df = pd.read_csv(os.path.join(script_dir, selected_file))
 
 # Ensure required columns exist
-required_columns = ['No.', 'Time', 'Source', 'Destination', 'Protocol', 'Length', 'Data', 'Info']
-missing_columns = [col for col in required_columns if col not in df.columns]
-if missing_columns:
-    print(f"Missing required columns in the CSV file: {missing_columns}")
+if 'Destination' not in df.columns or 'Data' not in df.columns or 'Protocol' not in df.columns:
+    print("Missing required columns in the CSV file.")
     exit()
 
-# Convert numeric columns to integers (handling NaN)
-df['No.'] = pd.to_numeric(df['No.'], errors='coerce')
-df['Length'] = pd.to_numeric(df['Length'], errors='coerce')
+# Filter rows where Destination is in the 239.x.x.x range and Protocol is UDP
+df = df[(df['Destination'].astype(str).str.startswith('239.')) & (df['Protocol'] == 'UDP')]
 
-# Remove malformed packets (length ≤ 65, non-UDP, or malformed hex patterns)
-malformed_df = df[
-    (df['Length'] <= 65) | 
-    (df['Protocol'] != 'UDP') | 
-    (df['Data'].str.startswith('3100', na=False))  # Extra filter for malformed packets
-]
-df = df[~df.index.isin(malformed_df.index)]  # Remove malformed rows
+# Remove malformed packets (length <= 65)
+df = df[df['Length'] > 65]
 
-# Save malformed packets separately
-malformed_file = os.path.join(script_dir, f"malformed_{selected_file.replace('.csv', '.xlsx')}")
-malformed_df.to_excel(malformed_file, index=False)
-print(f"\nMalformed packets saved as: {malformed_file}")
-
-# Filter rows where Destination is in the 239.x.x.x range
-df = df[df['Destination'].str.startswith('239.')]
-
-# Extract sequence numbers while maintaining CSV order
+# Extract sequence numbers
 df['Sequence Number'] = df['Data'].astype(str).apply(extract_sequence_number)
 
-# Evaluate sequence integrity per destination group (preserving CSV order)
-grouped = df.groupby('Destination', sort=False)  # No sorting
+# Process each multicast group
+grouped = df.groupby('Destination')
+summary = []
 
-for dest, group in grouped:
-    print(f"\nMulticast Group: {dest}")
-    prev_seq = None
-    for idx, row in group.iterrows():
-        current_seq = row['Sequence Number']
-        if prev_seq is not None and current_seq != prev_seq + 1:
-            missing_count = current_seq - prev_seq - 1
-            print(f"❌ No. {row['No.']}: Expected {prev_seq + 1}, got {current_seq} ({missing_count} packets missed)")
-        prev_seq = current_seq
-    print("✅ All sequence numbers are in order!")
+for destination, group in grouped:
+    print(f"Multicast Group: {destination}")
+    sequence_numbers = group['Sequence Number'].dropna().astype(int).tolist()
+    packet_numbers = group['No.'].tolist()
+    
+    out_of_order = False
+    for i in range(1, len(sequence_numbers)):
+        expected_seq = sequence_numbers[i - 1] + 1
+        actual_seq = sequence_numbers[i]
+        if expected_seq != actual_seq:
+            missed_packets = actual_seq - expected_seq
+            print(f"\u274C No. {packet_numbers[i]}: Expected {expected_seq}, got {actual_seq} ({missed_packets} packets missed)")
+            summary.append([destination, len(sequence_numbers), "\u274C Out-of-order detected", f"Expected {expected_seq}, got {actual_seq}, No. {packet_numbers[i]}"])
+            out_of_order = True
+    
+    if not out_of_order:
+        print(f"\u2705 All sequence numbers are in order!")
+        summary.append([destination, len(sequence_numbers), "\u2705 All in order", "-"])
 
-# Save processed file as Excel (.xlsx) in the same order
-processed_file = os.path.join(script_dir, selected_file.replace('.csv', '.xlsx'))
-df.to_excel(processed_file, index=False)
-print(f"\n✅ Full processed file saved as: {processed_file}")
+print("\nExporting processed Data ...")
+
+# Save processed file with summary
+output_file = os.path.join(script_dir, selected_file.replace('.csv', '.xlsx'))
+with pd.ExcelWriter(output_file) as writer:
+    df.to_excel(writer, sheet_name="Processed Data", index=False)
+    pd.DataFrame(summary, columns=["Destination", "Total Packets", "Status", "Sequence Info"]).to_excel(writer, sheet_name="Summary", index=False)
+
+print(f"\U0001F4C2 Processed file saved as: {output_file}")
