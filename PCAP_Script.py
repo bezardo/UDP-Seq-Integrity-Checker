@@ -9,23 +9,25 @@ def list_pcap_files():
     pcap_files = [f for f in os.listdir() if f.endswith('.pcap') or f.endswith('.pcapng')]
     return pcap_files
 
-def select_pcap_file(pcap_files):
-    """Allows user to select a pcap file from the list."""
+def select_pcap_files(pcap_files):
+    """Allows user to select multiple pcap files from the list."""
     if not pcap_files:
         print("No pcap files found in the current directory.")
-        return None
+        return []
+
     print("\nAvailable PCAP files:")
     for idx, file in enumerate(pcap_files, 1):
         print(f"{idx}. {file}")
-    while True:
-        try:
-            choice = int(input("\nSelect a file by number: ")) - 1
-            if 0 <= choice < len(pcap_files):
-                return pcap_files[choice]
-            else:
-                print("Invalid choice. Try again.")
-        except ValueError:
-            print("Please enter a valid number.")
+
+    selected_files = input("\nEnter file numbers to process (comma-separated): ").strip()
+    try:
+        selected_indices = [int(idx) - 1 for idx in selected_files.split(",")]
+        selected_pcap_files = [pcap_files[idx] for idx in selected_indices if 0 <= idx < len(pcap_files)]
+    except:
+        print("Invalid input! Please enter valid numbers.")
+        return []
+
+    return selected_pcap_files
 
 def hex_to_decimal(hex_value):
     """Convert a 4-byte hex string to decimal."""
@@ -89,8 +91,14 @@ def extract_pcap_data(pcap_file):
             # **Extract Sequence Number**
             df["Sequence Number"] = df["Data"].apply(extract_sequence_number)
 
-            # Handle missing values
-            df.fillna("No Data", inplace=True)
+            # Ensure 'Sequence Number' is fully numeric before sorting
+            df["Sequence Number"] = pd.to_numeric(df["Sequence Number"], errors="coerce")
+            
+            # Drop NaN values (invalid sequence numbers)
+            df = df.dropna(subset=["Sequence Number"])
+            
+            # Convert to integer after ensuring valid numeric values
+            df["Sequence Number"] = df["Sequence Number"].astype(int)
 
             return df
         else:
@@ -106,7 +114,7 @@ def detect_sequence_gaps(df, selected_groups, output_excel):
     summary = []
 
     for group in selected_groups:
-        print(f"\n Analyzing Sequence Numbers for Group: {group}")
+        print(f"\n🔍 Analyzing Sequence Numbers for Group: {group}")
 
         # Filter only packets for this destination group
         group_df = df[df["Destination"] == group]
@@ -121,10 +129,19 @@ def detect_sequence_gaps(df, selected_groups, output_excel):
         for source, packets in grouped:
             print(f"\n🔹 Source: {source}")
 
-            # Convert sequence numbers to integers and sort by sequence
+            # Ensure 'Sequence Number' is fully numeric and handle missing values
+            packets["Sequence Number"] = pd.to_numeric(packets["Sequence Number"], errors="coerce")
+
+            # Drop completely invalid sequence numbers before sorting
+            packets = packets.dropna(subset=["Sequence Number"])
+
+            # Convert to integer after ensuring valid numeric values
+            packets["Sequence Number"] = packets["Sequence Number"].astype(int)
+
+            # Now, sorting will work properly
             packets = packets.sort_values(by="Sequence Number").reset_index(drop=True)
 
-            sequence_numbers = packets["Sequence Number"].dropna().astype(int).tolist()
+            sequence_numbers = packets["Sequence Number"].tolist()
             packet_numbers = packets["No."].tolist()
 
             out_of_order = False
@@ -142,7 +159,7 @@ def detect_sequence_gaps(df, selected_groups, output_excel):
                 print("✅ All sequence numbers are in order!")
                 summary.append([group, len(sequence_numbers), "✅ All in order", "-"])
 
-    print("\n Exporting processed Data ...")
+    print("\n📂 Exporting processed Data ...")
 
     # Save processed file with summary and original data
     with pd.ExcelWriter(output_excel) as writer:
@@ -151,41 +168,44 @@ def detect_sequence_gaps(df, selected_groups, output_excel):
 
     print(f"📂 Processed file saved as: {output_excel}")
 
+def process_pcap_files(selected_pcap_files, selected_groups_per_pcap):
+    """Processes multiple PCAP files one by one with the selected multicast groups."""
+    for pcap_file in selected_pcap_files:
+        print(f"\n📂 Processing: {pcap_file}")
+        df = extract_pcap_data(pcap_file)
+        if df is None:
+            continue
+
+        selected_groups = selected_groups_per_pcap[pcap_file]
+        print(f"\n📊 Analyzing selected groups: {', '.join(selected_groups)}")
+
+        # **Analyze sequence number order & export summary**
+        output_excel = pcap_file.replace('.pcap', '.xlsx')  # Save Excel file with the same name as the pcap
+        detect_sequence_gaps(df, selected_groups, output_excel)
+
 def main():
     """Main function to run the process."""
     pcap_files = list_pcap_files()
-    selected_pcap = select_pcap_file(pcap_files)
-    if not selected_pcap:
+    selected_pcap_files = select_pcap_files(pcap_files)
+    if not selected_pcap_files:
         return
 
-    df = extract_pcap_data(selected_pcap)
-    if df is None:
-        return
+    selected_groups_per_pcap = {}
+    for pcap_file in selected_pcap_files:
+        df = extract_pcap_data(pcap_file)
+        if df is None:
+            continue
 
-    # **List Available Multicast Groups**
-    unique_groups = sorted(df["Destination"].unique())
-    print("\nAvailable Multicast Groups:")
-    for idx, group in enumerate(unique_groups, 1):
-        print(f"{idx}. {group}")
+        unique_groups = sorted(df["Destination"].unique())
+        print(f"\nAvailable Multicast Groups for {pcap_file}:")
+        for idx, group in enumerate(unique_groups, 1):
+            print(f"{idx}. {group}")
 
-    # **User selects multiple groups**
-    selected_indices = input("\nEnter group numbers to analyze (comma-separated): ").strip()
-    try:
-        selected_indices = [int(idx) - 1 for idx in selected_indices.split(",")]
-        selected_groups = [unique_groups[idx] for idx in selected_indices if 0 <= idx < len(unique_groups)]
-    except:
-        print("Invalid input! Please enter valid numbers.")
-        return
+        selected_indices = input(f"\nEnter group numbers to analyze for {pcap_file} (comma-separated): ").strip()
+        selected_groups = [unique_groups[int(idx) - 1] for idx in selected_indices.split(",") if 0 <= int(idx) - 1 < len(unique_groups)]
+        selected_groups_per_pcap[pcap_file] = selected_groups
 
-    if not selected_groups:
-        print("No valid groups selected. Exiting...")
-        return
-
-    print(f"\n Analyzing selected groups: {', '.join(selected_groups)}")
-
-    # **Analyze sequence number order & export summary**
-    output_excel = selected_pcap.replace('.pcap', '.xlsx')  # Save Excel file with the same name as the pcap
-    detect_sequence_gaps(df, selected_groups, output_excel)
+    process_pcap_files(selected_pcap_files, selected_groups_per_pcap)
 
 if __name__ == "__main__":
     main()
